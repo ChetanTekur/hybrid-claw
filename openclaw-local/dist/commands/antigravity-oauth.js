@@ -11,8 +11,8 @@ import { createInterface } from "node:readline/promises";
 import { loginAntigravity } from "@mariozechner/pi-ai";
 // OAuth constants - decoded from pi-ai's base64 encoded values to stay in sync
 const decode = (s) => Buffer.from(s, "base64").toString();
-const CLIENT_ID = decode("REDACTED_FOR_PUBLIC_REPO");
-const CLIENT_SECRET = decode("REDACTED_FOR_PUBLIC_REPO");
+const CLIENT_ID = decode("REDACTED_FOR_PUBLIC_REPO");  // See upstream OpenClaw for original value
+const CLIENT_SECRET = decode("REDACTED_FOR_PUBLIC_REPO");  // See upstream OpenClaw for original value
 const REDIRECT_URI = "http://localhost:51121/oauth-callback";
 const AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
