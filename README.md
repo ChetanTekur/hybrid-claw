@@ -4,7 +4,7 @@
   <strong>Free local models for simple tasks. Cloud models when you actually need them.</strong>
 </p>
 
-> **Prototype.** This is a proof-of-concept built on a Mac Mini M1 with 8 GB of RAM. It works, passes 67/67 routing tests, and saves real money — but it's scrappy. The models are tiny (270M parameters), the classifier is keyword-based, and some prompts will land in the wrong bucket. Consider this a starting point, not a finished product.
+> **Prototype. Mostly vibe-coded. Use at your own risk.** This is a proof-of-concept built on a Mac Mini M1 with 8 GB of RAM. It works, passes 67/67 routing tests, and saves real money — but it's scrappy. The entire project was built rapidly with heavy AI assistance (Claude wrote most of the code while I steered), the models are tiny (270M parameters), the classifier is keyword-based, and some prompts will land in the wrong bucket. Testing is limited to routing logic only — there are no integration tests, no security audits, and no guarantees. Consider this a starting point, not a finished product.
 
 ## What is this?
 
@@ -194,6 +194,8 @@ Configure these with `/identity` in the REPL or `bash openclaw-local.sh configur
 
 ## Testing
 
+> **Honest caveat:** Testing here is limited. The test suite only validates the **routing classifier** — it checks that prompts get scored correctly and routed to the right model. There are **no integration tests** (actual Ollama API calls), **no end-to-end tests** (full agent loop), **no security tests**, and **no load/stress tests**. The 67 tests cover the happy path well, but edge cases in the real OpenClaw agent loop, tool dispatch, or Ollama API are not tested. If you're building on this, add more tests.
+
 ```bash
 node test-suite.mjs
 ```
@@ -267,6 +269,27 @@ This is a prototype. Here's what to expect:
 
 5. **First-turn latency.** Ollama loads models into RAM on first use (~2-5s). Subsequent calls are fast. Keep Ollama running to avoid cold starts.
 
+## Security warning
+
+**This project was mostly vibe-coded.** That means:
+
+- The code was written rapidly with heavy AI assistance, not carefully hand-audited line by line
+- The routing layer intercepts every LLM call in the agent loop — if there's a bug, it could affect all interactions
+- API keys are resolved dynamically at runtime and passed between providers — handle your credentials carefully
+- The shell scripts execute `node -e` with inline JavaScript that reads your config file — standard injection caveats apply
+- The simplified tool schemas give FunctionGemma access to `exec` (arbitrary shell commands) — this is intentional for the use case but means the local model can run anything on your machine
+- No security audit has been performed on any of this code
+
+**Please take precautions:**
+
+- Review the code yourself before running it, especially `hybrid-router.js` and the shell scripts
+- Don't expose the gateway to the public internet without authentication
+- Keep your API keys in `~/.openclaw-local/openclaw.json`, not in the repo
+- Run in `local-only` mode first to test without touching cloud APIs
+- Back up your data — this is prototype software
+
+If you find a security issue, please open an issue on GitHub.
+
 ## Hardware notes
 
 This prototype was built and tested on a **Mac Mini M1 with 8 GB RAM**. The 270M models were chosen because they're the largest that run comfortably alongside macOS, Ollama, and OpenClaw in 8 GB.
@@ -282,16 +305,26 @@ This prototype was built and tested on a **Mac Mini M1 with 8 GB RAM**. The 270M
 
 ## What's next
 
-This was a weekend prototype to prove that hybrid local/cloud routing is viable for a personal AI assistant. It works — 67/67 routing tests pass, and real-world usage shows meaningful cost savings for daily tasks.
+This was a weekend prototype to prove that hybrid local/cloud routing is viable for a personal AI assistant. It works — 67/67 routing tests pass, and real-world usage shows meaningful cost savings for daily tasks. But there's a lot more to do.
 
-Next steps (contributions welcome):
+### Immediate next step: Cloud VM with larger models
 
-- **Better hardware validation.** Test with 16+ GB machines and larger models. The router architecture scales — only the model quality improves.
-- **Cloud VM proof-of-concept.** Run the same setup on a GPU VM (e.g., Lambda Labs, RunPod) to test with 30B+ parameter models. If this works well, the cloud API costs drop to near-zero.
+The biggest limitation right now is hardware. A Mac Mini M1 with 8 GB RAM can only run 270M-parameter models, which are... let's say "enthusiastic but not very bright." The routing architecture itself is model-agnostic — it doesn't care what's behind the Ollama API.
+
+The plan is to test Hybrid Claw on a **cloud VM with a real GPU** (e.g., Lambda Labs A10, RunPod 3090, or a Paperspace instance) running **30B+ parameter models** via Ollama. If a Qwen 3 30B or Llama 3.1 70B can handle most tasks locally, the cloud fallback becomes a rare luxury instead of a frequent necessity — and the API cost savings become dramatic.
+
+This would prove whether the hybrid routing concept scales beyond toy models, or whether you actually need cloud-grade intelligence for most tasks. Stay tuned.
+
+### Other next steps (contributions welcome)
+
+- **Better hardware validation.** Test with 16+ GB local machines and larger models. The router architecture scales — only the model quality improves.
+- **More tests.** Integration tests with actual Ollama calls, end-to-end agent loop tests, security review. The current test suite only covers the classifier.
 - **ML-based classifier.** Replace the keyword heuristic with a tiny fine-tuned classifier (~50M params) that scores complexity from embeddings. Would eliminate edge case misroutes.
 - **Streaming support for local models.** Pipe Ollama's token stream through to the user for perceived-instant responses.
 
-Or, if any generous readers want to fund an NVIDIA GB10 or a Mac Studio — or convince my wife that $4,000 on a computer is a reasonable investment in "the future of personal AI" — I'm all ears. DMs open.
+### The hardware fund
+
+Or, if any generous readers want to fund an NVIDIA GB10 or a Mac Studio — or convince my wife that $4,000 on a computer is a reasonable investment in "the future of personal AI" — I'm all ears. DMs open. I promise to write a very detailed blog post about the results. And name a variable after you.
 
 ## Credits
 
@@ -299,6 +332,21 @@ Or, if any generous readers want to fund an NVIDIA GB10 or a Mac Studio — or c
 
 The hybrid routing layer was built by [Chetan Tekur](https://github.com/chetantekur) with significant help from Claude (yes, the irony of using a cloud AI to build a system that avoids using cloud AI is not lost on me).
 
+## Disclaimer
+
+**THIS SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.** The author(s) are not liable for any damages, data loss, security breaches, unexpected API charges, or any other issues arising from the use of this software. You use Hybrid Claw entirely at your own risk.
+
+This is a prototype that was mostly vibe-coded in a weekend. It has not been professionally audited, penetration-tested, or reviewed for production use. It executes shell commands, manages API keys, and routes between model providers — all things that can go wrong in interesting ways if there are bugs.
+
+**By using this software, you acknowledge that:**
+- You are responsible for reviewing the code before running it
+- You are responsible for securing your own API keys and credentials
+- You are responsible for any costs incurred from cloud API usage
+- The author(s) make no guarantees about the correctness, security, or reliability of the routing decisions
+- The author(s) are not responsible for anything the local or cloud models say or do
+
 ## License
 
-MIT — same as OpenClaw. See [LICENSE](openclaw-local/LICENSE).
+MIT License. This is an **open project** — anyone can use, modify, fork, distribute, sell, or build upon this code for any reason, with no restrictions beyond the MIT license terms. Commercial use, personal use, educational use, whatever — go for it.
+
+See [LICENSE](LICENSE) for the full text.
