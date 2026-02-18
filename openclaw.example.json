@@ -1,0 +1,120 @@
+{
+  "meta": {
+    "lastTouchedVersion": "2026.1.30"
+  },
+  "auth": {
+    "profiles": {
+      "anthropic:your-key-name": {
+        "provider": "anthropic",
+        "mode": "token"
+      }
+    }
+  },
+  "models": {
+    "providers": {
+      "ollama": {
+        "baseUrl": "http://127.0.0.1:11434/v1",
+        "apiKey": "ollama-local",
+        "api": "openai-completions",
+        "models": [
+          {
+            "id": "functiongemma",
+            "name": "FunctionGemma 270M",
+            "reasoning": false,
+            "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 32768,
+            "maxTokens": 2048,
+            "compat": {
+              "supportsStore": false,
+              "supportsDeveloperRole": false,
+              "supportsReasoningEffort": false,
+              "maxTokensField": "max_tokens"
+            }
+          },
+          {
+            "id": "gemma3:270m",
+            "name": "Gemma 3 270M Text",
+            "reasoning": false,
+            "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 32768,
+            "maxTokens": 2048,
+            "compat": {
+              "supportsStore": false,
+              "supportsDeveloperRole": false,
+              "supportsReasoningEffort": false,
+              "maxTokensField": "max_tokens"
+            }
+          }
+        ]
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "anthropic/claude-sonnet-4-5",
+        "fallbacks": ["anthropic/claude-opus-4-5"]
+      },
+      "workspace": "~/.openclaw-local/workspace",
+      "hybridRouter": {
+        "enabled": true,
+        "preference": "prefer-local",
+        "localModel": {
+          "provider": "ollama",
+          "id": "functiongemma:latest"
+        },
+        "localTextModel": {
+          "provider": "ollama",
+          "id": "gemma3:270m"
+        },
+        "cloudModel": {
+          "provider": "anthropic",
+          "id": "claude-sonnet-4-5"
+        },
+        "routing": {
+          "complexityThreshold": 0.5,
+          "toolCallsPreferLocal": true,
+          "maxLocalResponseTokens": 500,
+          "forceCloudPatterns": [
+            "explain.*in detail",
+            "implement.*feature",
+            "refactor",
+            "write.*comprehensive"
+          ],
+          "forceLocalPatterns": [
+            "read.*file",
+            "list.*dir",
+            "run.*command",
+            "^(yes|no|ok|sure)$"
+          ]
+        },
+        "fallback": {
+          "onCloudUnavailable": "local-text",
+          "onLocalError": "cloud"
+        }
+      }
+    }
+  },
+  "tools": {
+    "web": {
+      "search": {
+        "enabled": true,
+        "apiKey": "YOUR_BRAVE_SEARCH_API_KEY"
+      },
+      "fetch": {
+        "enabled": true
+      }
+    }
+  },
+  "gateway": {
+    "port": 18790,
+    "mode": "local",
+    "bind": "loopback",
+    "auth": {
+      "mode": "token",
+      "token": "CHANGE_ME_TO_A_RANDOM_TOKEN"
+    }
+  }
+}

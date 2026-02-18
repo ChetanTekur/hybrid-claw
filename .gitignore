@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+
+# Local Claude Code settings (contains machine-specific paths)
+.claude/settings.local.json
+
+# Environment and secrets
+*.env
+.env*
+
+# OpenClaw state directory (lives at ~/.openclaw-local/, not in repo)
+# Listed here as a safeguard in case someone copies it in
+openclaw.json
+auth-profiles.json
+
+# Workspace identity files (contain personal info — configured per user)
+IDENTITY.md
+USER.md
+SOUL.md
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# Modelfiles (user-specific Ollama model configs)
+Modelfile.*
+
+# Build artifacts
+*.tgz
