@@ -4,7 +4,7 @@
   <strong>Free local models for simple tasks. Cloud models when you actually need them.</strong>
 </p>
 
-> **Prototype. Mostly vibe-coded. Use at your own risk.** This is a proof-of-concept built on a Mac Mini M1 with 8 GB of RAM. It works, passes 67/67 routing tests, and saves real money — but it's scrappy. The entire project was built rapidly with heavy AI assistance (Claude wrote most of the code while I steered), the models are tiny (270M parameters), the classifier is keyword-based, and some prompts will land in the wrong bucket. Testing is limited to routing logic only — there are no integration tests, no security audits, and no guarantees. Consider this a starting point, not a finished product.
+> **Prototype. Mostly vibe-coded. Use at your own risk.** This is a proof-of-concept built on a Mac Mini M1 with 8 GB of RAM. It works, passes 80/80 routing tests and 15/15 benchmark scenarios — but it's scrappy. The entire project was built rapidly with heavy AI assistance (Claude wrote most of the code while I steered), the models are tiny (270M parameters), the classifier is keyword-based, and some prompts will land in the wrong bucket. Realistic local routing with 270M models is ~20-30% of queries — you'd want larger models for serious savings. Consider this a starting point, not a finished product.
 
 ## What is this?
 
@@ -49,14 +49,14 @@ Every turn of the agent loop:
 1. **Preference override** — `local-only` or `cloud-only` short-circuits everything
 2. **Force-cloud patterns** — regex matches like `explain.*in detail`, `implement.*feature`, `refactor` → cloud
 3. **Force-local patterns** — regex matches like `read.*file`, `^(yes|no|ok|sure)$` → local
-4. **Post-tool turn** — last message is a `toolResult` → local (just needs to summarize)
+4. **Post-tool turn with Cloud Session Affinity** — last message is a `toolResult`. If the previous assistant turn was cloud-generated, stay on cloud for synthesis (otherwise a 270M model tries to summarize web search results — garbage). If local started the chain, stay local.
 5. **Cloud-capability tags** — prompt needs web search, real-time data, shopping, or recommendations → cloud (local models literally can't do these)
 6. **Heuristic scoring** — weighted keyword matching with multi-signal boost:
    - Score ≥ 0.7 → cloud (genuinely complex)
    - Score 0.5-0.7 under `prefer-local` → local-text (moderate, save money)
    - Score < 0.5 → local or local-text based on whether tools are needed
 
-The classifier is **keyword-based, not ML**. It uses ~20 weighted regex patterns plus word-count heuristics. It's surprisingly effective (67/67 tests pass) but will misroute some edge cases. See [Known limitations](#known-limitations).
+The classifier is **keyword-based, not ML**. It uses ~20 weighted regex patterns plus word-count heuristics. It's surprisingly effective (80/80 tests pass, 15/15 benchmark scenarios correct) but will misroute some edge cases. See [Known limitations](#known-limitations).
 
 ## Install
 
@@ -107,7 +107,7 @@ This launches an interactive chat with routing info displayed after each respons
 
 ```
   ╔═════════════════════════════════════════╗
-  ║       🦞 Hybrid Claw v0.2               ║
+  ║       🦞 Hybrid Claw v0.3               ║
   ║   Full OpenClaw + Smart Routing          ║
   ╚═════════════════════════════════════════╝
 
@@ -194,13 +194,17 @@ Configure these with `/identity` in the REPL or `bash openclaw-local.sh configur
 
 ## Testing
 
-> **Honest caveat:** Testing here is limited. The test suite only validates the **routing classifier** — it checks that prompts get scored correctly and routed to the right model. There are **no integration tests** (actual Ollama API calls), **no end-to-end tests** (full agent loop), **no security tests**, and **no load/stress tests**. The 67 tests cover the happy path well, but edge cases in the real OpenClaw agent loop, tool dispatch, or Ollama API are not tested. If you're building on this, add more tests.
+> **Honest caveat:** The test suite validates the **routing classifier and cloud session affinity** — it checks that prompts get scored correctly and routed to the right model. The 15-scenario benchmark validates routing decisions against the real config. End-to-end testing (actual agent loop with live models) was done manually for web search, file reads, recommendations, and cron jobs. There are **no automated integration tests**, **no security tests**, and **no load/stress tests**. If you're building on this, add more tests.
 
 ```bash
+# Unit tests (80 tests across 11 categories)
 node test-suite.mjs
+
+# Routing benchmark (15 real-world scenarios against your actual config)
+node routing-benchmark.mjs
 ```
 
-The test suite validates 67 routing scenarios across 10 categories:
+The test suite validates 80 routing scenarios across 11 categories:
 
 | Category | Tests | What it checks |
 |---|---|---|
@@ -214,6 +218,7 @@ The test suite validates 67 routing scenarios across 10 categories:
 | Edge Cases | 8 | Empty strings, emoji, long prompts, mixed signals |
 | Preference Overrides | 6 | local-only, cloud-only, prefer-cloud, prefer-local |
 | Score Boundaries | 4 | Threshold behavior, clamping to [0, 1] |
+| Cloud Session Affinity | 13 | Cloud post-tool → cloud, local post-tool → local, provider detection |
 
 ### Debug mode
 
@@ -231,12 +236,13 @@ Hybrid Claw is a **parallel installation** that runs alongside your regular Open
 
 | File | Purpose |
 |---|---|
-| `dist/agents/hybrid-router.js` | Core router: classifier, model resolution, streamFn wrapper (~715 lines) |
+| `dist/agents/hybrid-router.js` | Core router: classifier, cloud session affinity, model resolution, streamFn wrapper (~750 lines) |
 | `dist/commands/configure.identity.js` | Interactive identity wizard for agent personality |
 | `dist/commands/configure.local-models.js` | Interactive wizard for Ollama model selection |
-| `hybrid-claw.sh` | REPL with chat commands and routing display |
+| `hybrid-claw.sh` | Gateway + TUI launcher (v0.3): starts gateway from fork, launches TUI, auto-cleanup |
 | `openclaw-local.sh` | Launcher with Ollama auto-start and state isolation |
-| `test-suite.mjs` | 67-test validation suite |
+| `test-suite.mjs` | 80-test validation suite (11 categories) |
+| `routing-benchmark.mjs` | 15-scenario routing benchmark against real config |
 | `openclaw.example.json` | Template config with placeholder values |
 
 ### Files modified
@@ -244,16 +250,19 @@ Hybrid Claw is a **parallel installation** that runs alongside your regular Open
 | File | Change |
 |---|---|
 | `dist/agents/pi-embedded-runner/run/attempt.js` | Added hybrid router wrapper after `streamFn` setup |
+| `dist/tui/tui-session-actions.js` | Patched `refreshSessionInfo` to show actual routed model in status bar |
 | `dist/commands/configure.shared.js` | Added "identity" and "local-models" wizard sections |
 | `dist/commands/configure.wizard.js` | Added handlers for identity and local-models config |
 | `dist/wizard/onboarding.js` | Added identity and local-models steps to onboarding flow |
 
 ### Key design decisions
 
+- **Cloud Session Affinity.** When a cloud model starts a tool-call chain (e.g., web search), all subsequent post-tool turns stay on cloud so it can synthesize results properly. Without this, a 270M model would try to summarize web search results — producing garbage output.
 - **270M models need simplified tool schemas.** OpenClaw's 23 tools have complex schemas (the `exec` tool alone is 1037 chars with 12 parameters). FunctionGemma can't parse that. The router replaces them with 4 simplified core tools (read, exec, write, edit) with 1-3 parameters each.
 - **Identity injection prevents model self-identification.** Without it, Gemma 3 responds "I am a Gemma model" instead of maintaining the agent personality. The router reads workspace identity files at startup and injects a compact preamble.
 - **Cloud-capability tags bypass the complexity score.** Prompts needing web search, real-time data, or recommendations must go to cloud regardless of complexity — local models literally cannot fulfill these.
 - **Per-call API key resolution.** When switching from Ollama to Anthropic, the router resolves the API key dynamically so the correct auth is used.
+- **TUI status bar override.** The TUI status bar reads the session-level configured model, not the per-turn routed model. Patched `refreshSessionInfo` to query the last assistant message's actual provider/model from session history.
 
 ## Known limitations
 
@@ -305,7 +314,7 @@ This prototype was built and tested on a **Mac Mini M1 with 8 GB RAM**. The 270M
 
 ## What's next
 
-This was a weekend prototype to prove that hybrid local/cloud routing is viable for a personal AI assistant. It works — 67/67 routing tests pass, and real-world usage shows meaningful cost savings for daily tasks. But there's a lot more to do.
+This was a weekend prototype to prove that hybrid local/cloud routing is viable for a personal AI assistant. It works — 80/80 routing tests pass, 15/15 benchmark scenarios route correctly, and the routing architecture is solid. With 270M models, realistic local routing is ~20-30% of queries. With larger local models, the savings would be much more significant. But there's a lot more to do.
 
 ### Immediate next step: Cloud VM with larger models
 
@@ -318,7 +327,7 @@ This would prove whether the hybrid routing concept scales beyond toy models, or
 ### Other next steps (contributions welcome)
 
 - **Better hardware validation.** Test with 16+ GB local machines and larger models. The router architecture scales — only the model quality improves.
-- **More tests.** Integration tests with actual Ollama calls, end-to-end agent loop tests, security review. The current test suite only covers the classifier.
+- **More tests.** Integration tests with actual Ollama calls, end-to-end agent loop tests, security review.
 - **ML-based classifier.** Replace the keyword heuristic with a tiny fine-tuned classifier (~50M params) that scores complexity from embeddings. Would eliminate edge case misroutes.
 - **Streaming support for local models.** Pipe Ollama's token stream through to the user for perceived-instant responses.
 
