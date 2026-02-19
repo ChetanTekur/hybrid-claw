@@ -2,23 +2,13 @@
 # ╔═══════════════════════════════════════════════════════════════════════╗
 # ║  Hybrid Claw — Full OpenClaw with Smart Local/Cloud Routing          ║
 # ║                                                                       ║
-# ║  All OpenClaw features: web search, browser, skills, channels, hooks  ║
-# ║  + Automatic routing between local models (free) and cloud (Claude)   ║
-# ║                                                                       ║
-# ║  Chat Commands:                                                       ║
-# ║    /quit or /exit   — exit the chat                                   ║
-# ║    /mode <mode>     — switch routing: prefer-local, prefer-cloud,     ║
-# ║                       local-only, cloud-only                          ║
-# ║    /status          — show current routing config & features          ║
-# ║    /session <id>    — switch to a named session                       ║
-# ║    /new             — start a fresh session                           ║
-# ║                                                                       ║
-# ║  OpenClaw Commands (pass through):                                    ║
-# ║    /configure       — run the OpenClaw configure wizard               ║
-# ║    /identity        — configure agent name & personality              ║
-# ║    /local-models    — configure local Ollama models                   ║
-# ║    /doctor          — run health checks                               ║
-# ║    /setup           — initialize workspace                            ║
+# ║  Usage:                                                               ║
+# ║    ./hybrid-claw.sh              — start gateway + TUI (interactive)  ║
+# ║    ./hybrid-claw.sh tui          — start gateway + TUI (interactive)  ║
+# ║    ./hybrid-claw.sh agent <args> — run a single agent command         ║
+# ║    ./hybrid-claw.sh gateway      — start just the gateway             ║
+# ║    ./hybrid-claw.sh stop         — stop the background gateway        ║
+# ║    ./hybrid-claw.sh <any>        — pass through to openclaw-local.sh  ║
 # ╚═══════════════════════════════════════════════════════════════════════╝
 
 set -euo pipefail
@@ -26,225 +16,200 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LAUNCHER="${SCRIPT_DIR}/openclaw-local.sh"
 CONFIG="$HOME/.openclaw-local/openclaw.json"
-SESSION_ID="chat-$(date +%s)"
+GATEWAY_PID_FILE="/tmp/hybrid-claw-gateway.pid"
+GATEWAY_LOG="/tmp/hybrid-claw-gateway.log"
 
-# Resolve node binary (prefer homebrew on macOS, fall back to PATH)
-NODE_BIN="${NODE_BIN:-$(command -v node 2>/dev/null || echo "$NODE_BIN")}"
+# Resolve node binary
+NODE_BIN="${NODE_BIN:-$(command -v node 2>/dev/null || echo "/opt/homebrew/bin/node")}"
+if [[ ! -x "$NODE_BIN" ]]; then
+    echo "ERROR: node not found. Install Node.js or set NODE_BIN."
+    exit 1
+fi
+
+# Read gateway port from config
+GATEWAY_PORT=$("$NODE_BIN" -e "
+    try {
+        const cfg = JSON.parse(require('fs').readFileSync('${CONFIG}', 'utf-8'));
+        console.log(cfg.gateway?.port || 18790);
+    } catch { console.log(18790); }
+" 2>/dev/null)
+
+# Read gateway token from config
+GATEWAY_TOKEN=$("$NODE_BIN" -e "
+    try {
+        const cfg = JSON.parse(require('fs').readFileSync('${CONFIG}', 'utf-8'));
+        console.log(cfg.gateway?.auth?.token || '');
+    } catch { console.log(''); }
+" 2>/dev/null)
 
 # Colors
 CYAN='\033[0;36m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+RED='\033[0;31m'
 DIM='\033[0;90m'
 BOLD='\033[1m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
-echo -e "${CYAN}${BOLD}"
-echo "  ╔═════════════════════════════════════════╗"
-echo "  ║       🦞 Hybrid Claw v0.2               ║"
-echo "  ║   Full OpenClaw + Smart Routing          ║"
-echo "  ╚═════════════════════════════════════════╝"
-echo -e "${NC}"
-echo -e "${DIM}  Models: FunctionGemma (tools) • Gemma 3 270M (text) • Claude Sonnet (cloud)"
-echo -e "  Features: web search, browser, skills, channels, hooks — all enabled"
-echo -e "  Session: ${SESSION_ID}"
-echo -e "  Type /help for commands, /quit to exit${NC}"
-echo ""
+# ── Gateway management ─────────────────────────────────────────────────
 
-show_help() {
-    echo -e "${YELLOW}Chat Commands:${NC}"
-    echo "  /quit, /exit       Exit the chat"
-    echo "  /mode <mode>       Switch routing mode:"
-    echo "                       prefer-local  — use local when possible (default)"
-    echo "                       prefer-cloud  — use cloud when possible"
-    echo "                       local-only    — never use cloud"
-    echo "                       cloud-only    — always use cloud"
-    echo "  /status            Show current routing config & enabled features"
-    echo "  /session <id>      Switch to a named session (preserves history)"
-    echo "  /new               Start a fresh session"
-    echo ""
-    echo -e "${YELLOW}OpenClaw Commands:${NC}"
-    echo "  /configure         Run the OpenClaw configure wizard"
-    echo "  /identity          Configure agent name, personality & your info"
-    echo "  /local-models      Configure local Ollama models (function-calling + text)"
-    echo "  /doctor            Run health checks on gateway & channels"
-    echo "  /setup             Initialize workspace"
-    echo "  /onboard           Run the full onboarding wizard"
-    echo ""
-    echo -e "${YELLOW}Tips:${NC}"
-    echo "  • Simple tasks (file reads, commands) → local model (free, ~1-2s)"
-    echo "  • Text questions → local text model (free, ~1-3s)"
-    echo "  • Complex tasks (explain in detail, implement, refactor) → cloud (~15-20s)"
-    echo "  • Use /mode cloud-only to always use Claude Sonnet"
-    echo ""
+is_gateway_running() {
+    # Check if something is listening on the gateway port
+    lsof -i -P -n 2>/dev/null | grep -q ":${GATEWAY_PORT}.*LISTEN"
 }
 
-show_status() {
-    echo -e "${YELLOW}Current Configuration:${NC}"
-    echo -e "  Session:     ${SESSION_ID}"
-    $NODE_BIN -e "
-        const fs = require('fs');
-        const cfg = JSON.parse(fs.readFileSync('${CONFIG}', 'utf-8'));
-        const hr = cfg.agents?.defaults?.hybridRouter || {};
-        console.log('  Routing:     ' + (hr.preference || 'prefer-local'));
-        console.log('  Local:       ' + (hr.localModel?.id || 'functiongemma') + ' (tool calls)');
-        console.log('  Local-Text:  ' + (hr.localTextModel?.id || 'none') + ' (text answers)');
-        console.log('  Cloud:       ' + (hr.cloudModel?.provider || 'none') + '/' + (hr.cloudModel?.id || 'none'));
-        console.log('');
-        console.log('  Web Search:  ' + (cfg.tools?.web?.search?.enabled ? 'enabled' : 'disabled'));
-        console.log('  Web Fetch:   ' + (cfg.tools?.web?.fetch?.enabled ? 'enabled' : 'disabled'));
-        console.log('  Hooks:       ' + (cfg.hooks?.internal?.enabled ? 'enabled' : 'disabled'));
-        console.log('  Channels:    ' + Object.keys(cfg.channels || {}).filter(k => cfg.channels[k].enabled).join(', ') || 'none');
-        console.log('  Plugins:     ' + Object.keys(cfg.plugins?.entries || {}).filter(k => cfg.plugins.entries[k].enabled).join(', ') || 'none');
-        console.log('  Gateway:     port ' + (cfg.gateway?.port || 18790));
-        console.log('  Concurrency: ' + (cfg.agents?.defaults?.maxConcurrent || 1) + ' agents, ' + (cfg.agents?.defaults?.subagents?.maxConcurrent || 1) + ' subagents');
-    " 2>/dev/null
-    echo ""
-}
-
-set_mode() {
-    local new_mode="$1"
-    case "$new_mode" in
-        prefer-local|prefer-cloud|local-only|cloud-only)
-            $NODE_BIN -e "
-                const fs = require('fs');
-                const cfg = JSON.parse(fs.readFileSync('${CONFIG}', 'utf-8'));
-                cfg.agents.defaults.hybridRouter.preference = '${new_mode}';
-                fs.writeFileSync('${CONFIG}', JSON.stringify(cfg, null, 2) + '\n');
-                console.log('Routing mode set to: ${new_mode}');
-            " 2>/dev/null
-            ;;
-        *)
-            echo -e "${YELLOW}Unknown mode: ${new_mode}${NC}"
-            echo "  Valid modes: prefer-local, prefer-cloud, local-only, cloud-only"
-            ;;
-    esac
-    echo ""
-}
-
-# Main REPL loop
-while true; do
-    echo -en "${GREEN}${BOLD}you › ${NC}"
-    IFS= read -r input || break
-
-    # Skip empty input
-    [[ -z "${input// }" ]] && continue
-
-    # Handle commands
-    case "$input" in
-        /quit|/exit)
-            echo -e "${DIM}Goodbye! 👋${NC}"
-            break
-            ;;
-        /help)
-            show_help
-            continue
-            ;;
-        /status)
-            show_status
-            continue
-            ;;
-        /new)
-            SESSION_ID="chat-$(date +%s)"
-            echo -e "${DIM}New session: ${SESSION_ID}${NC}"
-            echo ""
-            continue
-            ;;
-        /session\ *)
-            SESSION_ID="${input#/session }"
-            echo -e "${DIM}Switched to session: ${SESSION_ID}${NC}"
-            echo ""
-            continue
-            ;;
-        /mode\ *)
-            set_mode "${input#/mode }"
-            continue
-            ;;
-        /mode)
-            echo -e "${YELLOW}Usage: /mode <prefer-local|prefer-cloud|local-only|cloud-only>${NC}"
-            echo ""
-            continue
-            ;;
-        /configure)
-            echo -e "${DIM}Launching OpenClaw configure wizard...${NC}"
-            bash "${LAUNCHER}" configure
-            echo ""
-            continue
-            ;;
-        /identity)
-            echo -e "${DIM}Launching identity configuration...${NC}"
-            bash "${LAUNCHER}" configure --sections identity
-            echo ""
-            continue
-            ;;
-        /local-models)
-            echo -e "${DIM}Launching local models configuration...${NC}"
-            bash "${LAUNCHER}" configure --sections local-models
-            echo ""
-            continue
-            ;;
-        /doctor)
-            echo -e "${DIM}Running health checks...${NC}"
-            bash "${LAUNCHER}" doctor
-            echo ""
-            continue
-            ;;
-        /setup)
-            echo -e "${DIM}Running workspace setup...${NC}"
-            bash "${LAUNCHER}" setup
-            echo ""
-            continue
-            ;;
-        /onboard)
-            echo -e "${DIM}Launching onboarding wizard...${NC}"
-            bash "${LAUNCHER}" onboard
-            echo ""
-            continue
-            ;;
-        /*)
-            echo -e "${YELLOW}Unknown command: ${input}. Type /help for available commands.${NC}"
-            echo ""
-            continue
-            ;;
-    esac
-
-    # Run the agent and capture output
-    echo -e "${DIM}thinking...${NC}"
-    result=$(bash "${LAUNCHER}" agent --local \
-        --message "${input}" \
-        --session-id "${SESSION_ID}" \
-        --json \
-        --timeout 120 2>&1)
-
-    # Extract routing info from stderr lines
-    route_info=$(echo "$result" | grep -o '→ [^ ]* model=[^ ]*' | head -1)
-
-    # Extract the response text from JSON
-    response=$($NODE_BIN -e "
-        const lines = process.argv[1].split('\n');
-        // Find the JSON object (skip [hybrid-router] log lines)
-        const jsonStart = lines.findIndex(l => l.trimStart().startsWith('{'));
-        if (jsonStart < 0) { console.log(lines.join('\n')); process.exit(0); }
-        try {
-            const json = JSON.parse(lines.slice(jsonStart).join('\n'));
-            const text = json.payloads?.[0]?.text || 'No response';
-            const ms = json.meta?.durationMs || 0;
-            const model = json.meta?.agentMeta?.model || '?';
-            const provider = json.meta?.agentMeta?.provider || '?';
-            console.log(text);
-            console.error(provider + '/' + model + ' · ' + (ms/1000).toFixed(1) + 's');
-        } catch(e) {
-            console.log(lines.join('\n'));
-        }
-    " "$result" 2>/tmp/hybrid-claw-meta.txt)
-
-    meta=$(cat /tmp/hybrid-claw-meta.txt 2>/dev/null || echo "")
-
-    # Print response
-    echo -e "\033[1A\033[2K"  # Clear "thinking..." line
-    echo -e "${CYAN}${BOLD}claw › ${NC}${response}"
-    if [[ -n "$meta" ]]; then
-        echo -e "${DIM}       ── ${route_info} ${meta}${NC}"
+start_gateway() {
+    if is_gateway_running; then
+        echo -e "${DIM}  Gateway already running on port ${GATEWAY_PORT}${NC}"
+        return 0
     fi
+
+    echo -e "${DIM}  Starting Hybrid Claw gateway on port ${GATEWAY_PORT}...${NC}"
+
+    # Start gateway as a background process from OUR fork (not system OpenClaw)
+    export OPENCLAW_STATE_DIR="$HOME/.openclaw-local"
+    export OPENCLAW_GATEWAY_TOKEN="${GATEWAY_TOKEN}"
+    "$NODE_BIN" "${SCRIPT_DIR}/openclaw-local/openclaw.mjs" gateway \
+        --port "${GATEWAY_PORT}" \
+        > "${GATEWAY_LOG}" 2>&1 &
+    local gw_pid=$!
+    echo "$gw_pid" > "${GATEWAY_PID_FILE}"
+
+    # Wait for gateway to be ready (up to 15 seconds)
+    local waited=0
+    while ! is_gateway_running; do
+        sleep 1
+        waited=$((waited + 1))
+        if [[ $waited -ge 15 ]]; then
+            echo -e "${RED}  ERROR: Gateway failed to start after 15 seconds.${NC}"
+            echo -e "${DIM}  Check ${GATEWAY_LOG} for details.${NC}"
+            kill "$gw_pid" 2>/dev/null || true
+            return 1
+        fi
+    done
+
+    echo -e "${GREEN}  Gateway running (PID ${gw_pid}, port ${GATEWAY_PORT})${NC}"
+}
+
+stop_gateway() {
+    if [[ -f "${GATEWAY_PID_FILE}" ]]; then
+        local pid
+        pid=$(cat "${GATEWAY_PID_FILE}")
+        if kill -0 "$pid" 2>/dev/null; then
+            kill "$pid"
+            echo -e "${DIM}  Stopped gateway (PID ${pid})${NC}"
+        fi
+        rm -f "${GATEWAY_PID_FILE}"
+    fi
+
+    # Also kill any node process listening on our port
+    local pids
+    pids=$(lsof -t -i ":${GATEWAY_PORT}" 2>/dev/null || true)
+    if [[ -n "$pids" ]]; then
+        echo "$pids" | xargs kill 2>/dev/null || true
+        echo -e "${DIM}  Killed process(es) on port ${GATEWAY_PORT}${NC}"
+    fi
+}
+
+# ── Ollama check ───────────────────────────────────────────────────────
+
+ensure_ollama() {
+    if curl -s http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then
+        return 0
+    fi
+    echo -e "${DIM}  Starting Ollama...${NC}"
+    open -a Ollama 2>/dev/null || true
+    for i in {1..30}; do
+        if curl -s http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then
+            echo -e "${GREEN}  Ollama ready${NC}"
+            return 0
+        fi
+        sleep 1
+    done
+    echo -e "${YELLOW}  WARNING: Ollama not detected — local models won't work${NC}"
+}
+
+# ── Banner ─────────────────────────────────────────────────────────────
+
+show_banner() {
+    echo -e "${CYAN}${BOLD}"
+    echo "  ╔═════════════════════════════════════════╗"
+    echo "  ║       🦞 Hybrid Claw v0.3               ║"
+    echo "  ║   Full OpenClaw + Smart Routing          ║"
+    echo "  ╚═════════════════════════════════════════╝"
+    echo -e "${NC}"
+    echo -e "${DIM}  Models: FunctionGemma (tools) • Gemma 3 270M (text) • Claude Sonnet (cloud)"
+    echo -e "  Features: web search, browser, skills, channels, cron, hooks — all enabled"
+    echo -e "  Gateway: ws://127.0.0.1:${GATEWAY_PORT}${NC}"
     echo ""
-done
+}
+
+# ── Cleanup on exit ────────────────────────────────────────────────────
+
+cleanup() {
+    # Only stop the gateway if WE started it (check PID file)
+    if [[ -f "${GATEWAY_PID_FILE}" ]]; then
+        local pid
+        pid=$(cat "${GATEWAY_PID_FILE}")
+        if kill -0 "$pid" 2>/dev/null; then
+            echo ""
+            echo -e "${DIM}  Stopping gateway (PID ${pid})...${NC}"
+            kill "$pid" 2>/dev/null || true
+        fi
+        rm -f "${GATEWAY_PID_FILE}"
+    fi
+}
+
+# ── Main ───────────────────────────────────────────────────────────────
+
+cmd="${1:-tui}"
+
+case "$cmd" in
+    tui|"")
+        # Default: start gateway + TUI
+        show_banner
+        ensure_ollama
+        start_gateway || exit 1
+        echo ""
+
+        # Trap to stop gateway when TUI exits
+        trap cleanup EXIT
+
+        # Launch the TUI connected to OUR gateway
+        echo -e "${DIM}  Launching TUI...${NC}"
+        echo ""
+        export OPENCLAW_STATE_DIR="$HOME/.openclaw-local"
+        exec "$NODE_BIN" "${SCRIPT_DIR}/openclaw-local/openclaw.mjs" tui \
+            --url "ws://127.0.0.1:${GATEWAY_PORT}" \
+            --token "${GATEWAY_TOKEN}"
+        ;;
+
+    gateway)
+        # Start just the gateway (foreground)
+        show_banner
+        ensure_ollama
+        echo -e "${DIM}  Starting gateway in foreground (Ctrl+C to stop)...${NC}"
+        echo ""
+        export OPENCLAW_STATE_DIR="$HOME/.openclaw-local"
+        export OPENCLAW_GATEWAY_TOKEN="${GATEWAY_TOKEN}"
+        exec "$NODE_BIN" "${SCRIPT_DIR}/openclaw-local/openclaw.mjs" gateway \
+            --port "${GATEWAY_PORT}"
+        ;;
+
+    stop)
+        stop_gateway
+        ;;
+
+    agent)
+        # Pass through to openclaw-local.sh for single-turn agent commands
+        shift
+        export OPENCLAW_STATE_DIR="$HOME/.openclaw-local"
+        exec bash "${LAUNCHER}" agent --local "$@"
+        ;;
+
+    *)
+        # Pass through any other command to openclaw-local.sh
+        export OPENCLAW_STATE_DIR="$HOME/.openclaw-local"
+        exec bash "${LAUNCHER}" "$@"
+        ;;
+esac

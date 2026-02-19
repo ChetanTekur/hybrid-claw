@@ -96,6 +96,28 @@ export function createSessionActions(context) {
                     updatedAt: entry?.updatedAt ?? null,
                     displayName: entry?.displayName,
                 };
+
+                // ── Hybrid Router: show actual model used (not just configured) ──
+                // When the hybrid router switches models per-turn, the session-level
+                // model stays as the configured default. Override with the last
+                // assistant message's actual provider/model from session history.
+                try {
+                    const history = await client.loadHistory({
+                        sessionKey: state.currentSessionKey,
+                        limit: 5,
+                    });
+                    const msgs = history?.messages;
+                    if (Array.isArray(msgs)) {
+                        for (let i = msgs.length - 1; i >= 0; i--) {
+                            const m = msgs[i];
+                            if (m?.role === "assistant" && (m.provider || m.model)) {
+                                if (m.provider) state.sessionInfo.modelProvider = m.provider;
+                                if (m.model) state.sessionInfo.model = m.model;
+                                break;
+                            }
+                        }
+                    }
+                } catch { /* ignore — fall back to session-level model */ }
             }
             catch (err) {
                 chatLog.addSystem(`sessions list failed: ${String(err)}`);

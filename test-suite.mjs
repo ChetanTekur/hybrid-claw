@@ -3,7 +3,7 @@
  * Run: node test-suite.mjs
  */
 
-import { classifyComplexity, makeRoutingDecision, resolveHybridRouterConfig, hasCloudApiKey } from './openclaw-local/dist/agents/hybrid-router.js';
+import { classifyComplexity, makeRoutingDecision, resolveHybridRouterConfig, hasCloudApiKey, wasLastAssistantCloud } from './openclaw-local/dist/agents/hybrid-router.js';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -188,17 +188,17 @@ console.log("=== TEST 8: Edge Cases ===");
   d = routeFor("read the file and explain in detail what it does");
   assert("mixed (force-cloud checked first): " + d.target + " reason=" + d.reason, d.target === "cloud");
 
-  // Post-tool turn simulation
+  // Post-tool turn simulation (local assistant — stays local)
   const postToolCtx = {
     messages: [
       { role: "user", content: "read package.json" },
-      { role: "assistant", content: [{ type: "toolCall", name: "read", args: {} }] },
+      { role: "assistant", content: [{ type: "toolCall", name: "read", args: {} }], provider: "ollama" },
       { role: "toolResult", content: "file contents here" },
     ],
     tools: [],
   };
   const postToolDecision = makeRoutingDecision(postToolCtx, routerCfg, models, cfg);
-  assert("post-tool turn -> local (got " + postToolDecision.target + ")", postToolDecision.target === "local");
+  assert("post-tool turn (local assistant) -> local (got " + postToolDecision.target + ")", postToolDecision.target === "local");
 
   // Greeting -> local-text
   d = routeFor("hello");
@@ -265,6 +265,104 @@ console.log("=== TEST 10: Score Boundaries ===");
   };
   const score4 = classifyComplexity(ctx4, routerCfg.routing);
   assert("many complex keywords clamped to 1.0 (got " + score4.score.toFixed(2) + ")", score4.score <= 1.0);
+}
+console.log("");
+
+// ================================================================
+console.log("=== TEST 11: Cloud Session Affinity ===");
+{
+  // When a cloud model makes a tool call, the post-tool summarisation
+  // should stay on cloud to preserve quality and formatting.
+
+  // Case 1: Cloud assistant made a tool call -> tool result -> should route to CLOUD
+  const cloudPostTool = {
+    messages: [
+      { role: "user", content: "what is the latest headlines from Google news" },
+      { role: "assistant", content: [{ type: "toolCall", name: "web_search", args: { query: "Google news headlines today" } }], provider: "anthropic", model: "anthropic/claude-sonnet-4-5" },
+      { role: "toolResult", content: "Fox News - Breaking News...\nCNN Headlines...\nNBC News..." },
+    ],
+    tools: [],
+  };
+  let d = makeRoutingDecision(cloudPostTool, routerCfg, models, cfg);
+  assert("cloud post-tool (news) -> cloud (got " + d.target + ", reason=" + d.reason + ")", d.target === "cloud");
+
+  // Case 2: Local assistant made a tool call -> tool result -> should route to LOCAL
+  const localPostTool = {
+    messages: [
+      { role: "user", content: "read package.json" },
+      { role: "assistant", content: [{ type: "toolCall", name: "read", args: { path: "package.json" } }], provider: "ollama", model: "ollama/functiongemma" },
+      { role: "toolResult", content: '{ "name": "test", "version": "1.0" }' },
+    ],
+    tools: [],
+  };
+  d = makeRoutingDecision(localPostTool, routerCfg, models, cfg);
+  assert("local post-tool (read) -> local (got " + d.target + ", reason=" + d.reason + ")", d.target === "local");
+
+  // Case 3: Cloud multi-step tool chain (multiple tool calls in sequence)
+  const cloudMultiStep = {
+    messages: [
+      { role: "user", content: "Find the best ski socks and compare prices" },
+      { role: "assistant", content: [{ type: "toolCall", name: "web_search", args: { query: "best ski socks 2025" } }], provider: "anthropic" },
+      { role: "toolResult", content: "Results: Smartwool, Darn Tough, Icebreaker..." },
+      { role: "assistant", content: [{ type: "toolCall", name: "web_fetch", args: { url: "https://example.com" } }], provider: "anthropic" },
+      { role: "toolResult", content: "Price comparison data..." },
+    ],
+    tools: [],
+  };
+  d = makeRoutingDecision(cloudMultiStep, routerCfg, models, cfg);
+  assert("cloud multi-step chain -> cloud (got " + d.target + ", reason=" + d.reason + ")", d.target === "cloud");
+
+  // Case 4: No assistant message at all (first turn) with tool result -> local
+  const noAssistant = {
+    messages: [
+      { role: "toolResult", content: "some injected context" },
+    ],
+    tools: [],
+  };
+  d = makeRoutingDecision(noAssistant, routerCfg, models, cfg);
+  assert("no assistant + toolResult -> local (got " + d.target + ")", d.target === "local");
+
+  // Case 5: wasLastAssistantCloud helper unit tests
+  assert("wasLastAssistantCloud: anthropic provider -> true",
+    wasLastAssistantCloud([
+      { role: "assistant", content: "hi", provider: "anthropic" },
+      { role: "toolResult", content: "data" },
+    ]) === true);
+
+  assert("wasLastAssistantCloud: ollama provider -> false",
+    wasLastAssistantCloud([
+      { role: "assistant", content: "hi", provider: "ollama" },
+      { role: "toolResult", content: "data" },
+    ]) === false);
+
+  assert("wasLastAssistantCloud: openai model string -> true",
+    wasLastAssistantCloud([
+      { role: "assistant", content: "hi", model: "openai/gpt-4" },
+      { role: "toolResult", content: "data" },
+    ]) === true);
+
+  assert("wasLastAssistantCloud: empty messages -> false",
+    wasLastAssistantCloud([]) === false);
+
+  assert("wasLastAssistantCloud: no assistant messages -> false",
+    wasLastAssistantCloud([
+      { role: "user", content: "hello" },
+      { role: "toolResult", content: "data" },
+    ]) === false);
+
+  // Case 6: Cloud continuation with different cloud providers
+  for (const provider of ["anthropic", "openai", "google", "openrouter"]) {
+    const ctx = {
+      messages: [
+        { role: "user", content: "search for something" },
+        { role: "assistant", content: [{ type: "toolCall", name: "web_search", args: {} }], provider },
+        { role: "toolResult", content: "results" },
+      ],
+      tools: [],
+    };
+    d = makeRoutingDecision(ctx, routerCfg, models, cfg);
+    assert("cloud affinity with " + provider + " -> cloud (got " + d.target + ")", d.target === "cloud");
+  }
 }
 console.log("");
 
